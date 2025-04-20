@@ -3,34 +3,21 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chunked File Upload & Segmentation</title>
+    <title>Multi-Video Upload & Segmentation</title>
     <style>
         /* আগের CSS কোড এখানে থাকবে */
         body { font-family: sans-serif; padding: 20px; }
-        #progress-bar {
-            width: 100%;
-            background-color: #f3f3f3;
-            border: 1px solid #ccc;
-            height: 20px;
-            margin-top: 10px;
-        }
-        #progress {
-            width: 0%;
-            height: 100%;
-            background-color: #4CAF50;
-            text-align: center;
-            line-height: 20px;
-            color: white;
-        }
+        #progress-bar { width: 100%; background-color: #f3f3f3; border: 1px solid #ccc; height: 20px; margin-top: 10px; }
+        #progress { width: 0%; height: 100%; background-color: #4CAF50; text-align: center; line-height: 20px; color: white; }
         #status { margin-top: 15px; font-weight: bold; }
-        #video-links { margin-top: 15px; } /* আইডি video-link থেকে video-links করা হলো */
+        #video-links { margin-top: 15px; }
         #video-links ul { list-style: none; padding: 0; }
         #video-links li { margin-bottom: 5px; }
     </style>
 </head>
 <body>
 
-<h1>Upload Large File (Chunked) & Split into 20min Segments</h1>
+<h1>Upload Large File (Chunked) & Split (Unique ID per Video)</h1>
 
 <input type="file" id="fileInput"><br><br>
 <button id="uploadButton">Upload and Split</button>
@@ -39,12 +26,14 @@
     <div id="progress">0%</div>
 </div>
 <div id="status">Please select a file and click Upload.</div>
-<div id="video-links"></div> <script>
+<div id="video-links"></div>
+
+<script>
     const fileInput = document.getElementById('fileInput');
     const uploadButton = document.getElementById('uploadButton');
     const progressBar = document.getElementById('progress');
     const statusDiv = document.getElementById('status');
-    const videoLinksDiv = document.getElementById('video-links'); // আইডি অনুযায়ী ভ্যারিয়েবল আপডেট
+    const videoLinksDiv = document.getElementById('video-links');
 
     const CHUNK_SIZE = 1024 * 1024 * 5; // 5MB Chunks
 
@@ -55,37 +44,44 @@
             return;
         }
 
-        statusDiv.textContent = 'Starting upload...';
+        statusDiv.textContent = 'Initializing upload...';
         progressBar.style.width = '0%';
         progressBar.textContent = '0%';
-        videoLinksDiv.innerHTML = ''; // আগের লিঙ্ক মুছে ফেলা
+        videoLinksDiv.innerHTML = '';
         uploadButton.disabled = true;
 
         const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-        const uploadId = crypto.randomUUID();
+        // --- প্রতিটি আপলোডের জন্য ইউনিক videoId তৈরি ---
+        const videoId = crypto.randomUUID();
+        // একটি ইউনিক uploadId (চাঙ্ক ট্র্যাকিং এর জন্য, videoId থেকে ভিন্ন হতে পারে)
+        const uploadId = crypto.randomUUID(); // অথবা অন্য কোনো ইউনিক স্ট্রিং
 
-        console.log(`File size: ${file.size} bytes, Total chunks: ${totalChunks}, Upload ID: ${uploadId}`);
+        console.log(`File: ${file.name}, Size: ${file.size}, Chunks: ${totalChunks}`);
+        console.log(`Video ID: ${videoId}`);
+        console.log(`Upload (Chunk) ID: ${uploadId}`);
 
         let currentChunk = 0;
 
         function uploadChunk() {
             if (currentChunk >= totalChunks) {
-                console.log('All chunks potentially sent. Waiting for final processing confirmation.');
-                statusDiv.textContent = 'File uploaded. Now processing and splitting... Please wait.'; // আপডেটেড মেসেজ
+                console.log(`[${videoId}] All chunks sent. Waiting for server processing.`);
+                statusDiv.textContent = `[${videoId}] Upload complete. Processing and splitting... Please wait.`;
                 return;
             }
 
             const start = currentChunk * CHUNK_SIZE;
             const end = Math.min(start + CHUNK_SIZE, file.size);
             const chunk = file.slice(start, end);
+
             const formData = new FormData();
             formData.append('file', chunk, file.name + ".part" + currentChunk);
             formData.append('chunkIndex', currentChunk);
             formData.append('totalChunks', totalChunks);
-            formData.append('uploadId', uploadId);
+            formData.append('uploadId', uploadId); // চাঙ্ক ট্র্যাকিং এর আইডি
+            formData.append('videoId', videoId);   // ভিডিওর মূল আইডি
             formData.append('originalFilename', file.name);
 
-            statusDiv.textContent = `Uploading chunk ${currentChunk + 1} of ${totalChunks}...`;
+            statusDiv.textContent = `[${videoId}] Uploading chunk ${currentChunk + 1} of ${totalChunks}...`;
 
             fetch('/upload_chunk', {
                 method: 'POST',
@@ -93,50 +89,64 @@
             })
             .then(response => {
                 if (!response.ok) {
+                    // চেষ্টা করা যাক JSON error body পার্স করার
                     return response.json().then(errorData => {
-                        throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+                        // সার্ভার থেকে আসা error message ব্যবহার করা
+                        throw new Error(errorData.error || `Server error: ${response.status}`);
+                    }).catch(() => {
+                        // যদি JSON পার্স না হয়, শুধু স্ট্যাটাস কোড দেখানো
+                        throw new Error(`HTTP error! status: ${response.status}`);
                     });
                 }
                 return response.json();
             })
             .then(data => {
-                console.log(`Chunk ${currentChunk + 1} response:`, data);
+                console.log(`[${videoId}] Chunk ${currentChunk + 1} response:`, data);
                 const progress = Math.round(((currentChunk + 1) / totalChunks) * 100);
                 progressBar.style.width = progress + '%';
                 progressBar.textContent = progress + '%';
 
-                // যদি ফাইল এসেম্বল এবং স্প্লিট হয়ে যায় (শেষ খণ্ডের রেসপন্সে আসবে)
+                // যদি সেগমেন্ট URL লিস্ট আসে
                 if (data.segment_urls && Array.isArray(data.segment_urls)) {
-                    statusDiv.textContent = 'File upload and splitting complete!';
-                    let linksHTML = '<p>Video segments are ready:</p><ul>';
+                    statusDiv.textContent = `[${videoId}] File upload and splitting complete!`;
+                    let linksHTML = `<p>Video segments for ID [${videoId}]:</p><ul>`;
                     data.segment_urls.forEach(url => {
-                        // URL থেকে ফাইলের নাম বের করা (যেমন: /segments/see1.mp4 -> see1.mp4)
+                        // URL থেকে শেষ অংশটি (যেমন: /videoId/see1.mp4 -> see1.mp4) বের করা
                         const filename = url.substring(url.lastIndexOf('/') + 1);
-                        linksHTML += `<li><a href="${url}" target="_blank">${filename}</a></li>`;
+                        // সম্পূর্ণ URL ব্যবহার করে লিঙ্ক তৈরি
+                        linksHTML += `<li><a href="${url}" target="_blank">${filename}</a> (Link: ${url})</li>`;
                     });
                     linksHTML += '</ul>';
-                    videoLinksDiv.innerHTML = linksHTML; // সেগমেন্টের লিঙ্কগুলো দেখানো
+                    // এখানে একই পেজে আগের আপলোডের লিঙ্ক না মুছে নতুনটা যোগ করতে পারেন, অথবা শুধু বর্তমানটা দেখাতে পারেন
+                    // videoLinksDiv.innerHTML += linksHTML; // যোগ করতে চাইলে
+                    videoLinksDiv.innerHTML = linksHTML; // প্রতিস্থাপন করতে চাইলে
                     uploadButton.disabled = false;
-                } else if (currentChunk < totalChunks -1) { // যদি শেষ খণ্ড না হয়
-                     // পরের খণ্ড আপলোড করা (ফাইল এসেম্বল/স্প্লিট না হলে)
-                     currentChunk++;
-                     uploadChunk();
+                } else if (currentChunk < totalChunks - 1) {
+                    // পরের খণ্ড আপলোড
+                    currentChunk++;
+                    uploadChunk();
                 } else if (currentChunk === totalChunks - 1 && !data.segment_urls) {
-                    // শেষ খণ্ড আপলোড হয়েছে কিন্তু সার্ভার এখনো প্রসেসিং শেষ করেনি বা সেগমেন্ট URL পাঠায়নি
-                    // অথবা যদি এসেম্বল বা স্প্লিটিং এ এরর হয় (এরর মেসেজ চেক করা উচিত)
-                    statusDiv.textContent = data.error || 'Processing complete, but no segments returned.';
-                     // uploadButton.disabled = false; // এরর হলে বাটন এনাবল করা যেতে পারে
+                    // শেষ খণ্ড আপলোড হয়েছে কিন্তু সার্ভার সফলভাবে প্রসেস করেনি বা URL পাঠায়নি
+                     statusDiv.textContent = `[${videoId}] ` + (data.error || 'Processing finished, but no segment URLs returned.');
+                     uploadButton.disabled = false; // বাটন এনাবল করা উচিত
                 }
+                 // যদি শুধু চাঙ্ক পাওয়ার মেসেজ আসে (শেষ চাঙ্ক নয়)
+                 else if (data.message && !data.segment_urls && currentChunk < totalChunks -1) {
+                    currentChunk++;
+                    uploadChunk();
+                 }
+
 
             })
             .catch(error => {
-                console.error('Error during upload/processing:', error);
-                statusDiv.textContent = `Error: ${error.message}. Please try again.`;
+                console.error(`[${videoId}] Error during upload/processing:`, error);
+                statusDiv.textContent = `[${videoId}] Error: ${error.message}. Please try again.`;
                 uploadButton.disabled = false;
             });
         }
 
-        uploadChunk(); // প্রথম খণ্ড আপলোড শুরু করা
+        // প্রথম খণ্ড আপলোড শুরু করা
+        uploadChunk();
     });
 </script>
 
